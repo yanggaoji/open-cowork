@@ -55,6 +55,10 @@ import {
 } from './session-title-utils';
 import { generateTitleWithClaudeSdk } from '../claude/claude-sdk-one-shot';
 import { buildScheduledTaskTitle } from '../../shared/schedule/task-title';
+import {
+  buildLongTermMemoryContext,
+  type LongTermMemoryCandidate,
+} from '../memory/long-term-memory';
 
 interface AgentRunner {
   run(session: Session, prompt: string, existingMessages: Message[]): Promise<void>;
@@ -130,6 +134,8 @@ export class SessionManager {
       {
         sendToRenderer: this.sendToRenderer,
         saveMessage: (message: Message) => this.saveMessage(message),
+        getLongTermMemoryContext: (session: Session, prompt: string) =>
+          this.getLongTermMemoryContext(session, prompt),
         requestSudoPassword: (sessionId: string, toolUseId: string, command: string) =>
           this.requestSudoPassword(sessionId, toolUseId, command),
       },
@@ -283,11 +289,63 @@ export class SessionManager {
         'glob',
         'grep',
       ],
-      memoryEnabled: false,
+      memoryEnabled: true,
       model: configStore.get('model') || undefined,
       createdAt: now,
       updatedAt: now,
     };
+  }
+
+  private getLongTermMemoryContext(session: Session, prompt: string): string | null {
+    if (!session.memoryEnabled) {
+      return null;
+    }
+
+    const cwd = session.cwd?.trim();
+    if (!cwd) {
+      return null;
+    }
+
+    const relatedSessions = this.db.sessions
+      .getAll()
+      .filter((row) => row.id !== session.id && row.cwd === cwd)
+      .sort((left, right) => right.updated_at - left.updated_at)
+      .slice(0, 12);
+
+    if (relatedSessions.length === 0) {
+      return null;
+    }
+
+    const candidates: LongTermMemoryCandidate[] = [];
+
+    for (const relatedSession of relatedSessions) {
+      const messages = this.db.messages.getBySessionId(relatedSession.id).slice(-12);
+      for (const message of messages) {
+        if (message.role !== 'user' && message.role !== 'assistant') {
+          continue;
+        }
+
+        const text = this.normalizeContent(message.content)
+          .filter((block) => block.type === 'text')
+          .map((block) => block.text)
+          .join('\n')
+          .trim();
+
+        if (!text || text.startsWith('**Error**:')) {
+          continue;
+        }
+
+        candidates.push({
+          sessionId: relatedSession.id,
+          sessionTitle: relatedSession.title,
+          role: message.role,
+          text,
+          timestamp: message.timestamp,
+        });
+      }
+    }
+
+    return buildLongTermMemoryContext(prompt, candidates);
   }
 
   // Save session to database

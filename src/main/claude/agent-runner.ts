@@ -396,6 +396,7 @@ function normalizeTokenUsage(usage: unknown): Message['tokenUsage'] | undefined 
 interface AgentRunnerOptions {
   sendToRenderer: (event: ServerEvent) => void;
   saveMessage?: (message: Message) => void;
+  getLongTermMemoryContext?: (session: Session, prompt: string) => string | null;
   requestSudoPassword?: (
     sessionId: string,
     toolUseId: string,
@@ -422,6 +423,7 @@ interface CachedPiSession {
 export class ClaudeAgentRunner {
   private sendToRenderer: (event: ServerEvent) => void;
   private saveMessage?: (message: Message) => void;
+  private getLongTermMemoryContext?: (session: Session, prompt: string) => string | null;
   private requestSudoPassword?: (
     sessionId: string,
     toolUseId: string,
@@ -706,6 +708,7 @@ ${hints.join('\n')}
   ) {
     this.sendToRenderer = options.sendToRenderer;
     this.saveMessage = options.saveMessage;
+    this.getLongTermMemoryContext = options.getLongTermMemoryContext;
     this.requestSudoPassword = options.requestSudoPassword;
     this.pathResolver = pathResolver;
     this.mcpManager = mcpManager;
@@ -1581,6 +1584,12 @@ ${hints.join('\n')}
               ')'
             );
           }
+        }
+
+        const longTermMemory = this.getLongTermMemoryContext?.(session, prompt);
+        if (longTermMemory) {
+          contextualPrompt = `${longTermMemory}\n\n${contextualPrompt}`;
+          log('[ClaudeAgentRunner] Cold start: injected workspace long-term memory');
         }
       } else {
         // Reusing session — SDK already has the full conversation context
