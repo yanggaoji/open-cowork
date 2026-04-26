@@ -124,4 +124,16 @@ describe('ClaudeAgentRunner pi-coding-agent integration', () => {
     );
     expect(agentRunnerContent).toContain('START DOING IT');
   });
+
+  it('documents Windows bash semantics and skill import limits in the system prompt', () => {
+    expect(agentRunnerContent).toContain(
+      'On Windows, the built-in bash tool runs through bash.exe (typically Git Bash/MSYS), not cmd.exe or PowerShell.'
+    );
+    expect(agentRunnerContent).toContain(
+      'If you need native Windows shell behavior, invoke powershell.exe -NoProfile -Command "..." or cmd.exe /c "..." explicitly.'
+    );
+    expect(agentRunnerContent).toContain(
+      'Skill folders are instructions and helper files, not automatically importable Python packages.'
+    );
+  });
 });

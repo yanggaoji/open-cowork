@@ -508,6 +508,38 @@ ${hints.join('\n')}
 </bundled_executables>`;
   }
 
+  private getExecutionEnvironmentPrompt(
+    useSandboxIsolation: boolean,
+    sandbox: { isWSL: boolean; isLima: boolean }
+  ): string {
+    const sharedLines = [
+      'Skill folders are instructions and helper files, not automatically importable Python packages.',
+      'Only import Python modules that are installed in the environment or present in the workspace as real packages.',
+    ];
+
+    if (useSandboxIsolation && (sandbox.isWSL || sandbox.isLima)) {
+      return `<execution_environment>
+Commands run inside a Linux sandbox. Use POSIX shell syntax and Linux paths.
+${sharedLines.join('\n')}
+</execution_environment>`;
+    }
+
+    if (process.platform === 'win32') {
+      return `<execution_environment>
+On Windows, the built-in bash tool runs through bash.exe (typically Git Bash/MSYS), not cmd.exe or PowerShell.
+When using the bash tool, prefer POSIX shell syntax and Unix utilities.
+Use quoted forward-slash Windows paths like C:/Users/... or workspace-relative paths; avoid raw unquoted C:\\... paths.
+If you need native Windows shell behavior, invoke powershell.exe -NoProfile -Command "..." or cmd.exe /c "..." explicitly.
+${sharedLines.join('\n')}
+</execution_environment>`;
+    }
+
+    return `<execution_environment>
+Commands run in a POSIX shell. Use bash-compatible syntax and POSIX paths.
+${sharedLines.join('\n')}
+</execution_environment>`;
+  }
+
   /** Fallback skill path resolution when SkillsAdapter is not provided. */
   private legacySkillPaths(): string[] {
     const paths: string[] = [];
@@ -1744,6 +1776,10 @@ This is an isolated sandbox environment. Use ${VIRTUAL_WORKSPACE_PATH} as the ro
           : workingDir
             ? `<workspace_info>Your current workspace is: ${workingDir}</workspace_info>`
             : '';
+      const executionEnvironmentPrompt = this.getExecutionEnvironmentPrompt(
+        useSandboxIsolation,
+        sandbox
+      );
 
       const coworkAppendPrompt = [
         'You are an Open Cowork assistant. Be concise, accurate, and tool-capable.',
@@ -1754,6 +1790,7 @@ This is an isolated sandbox environment. Use ${VIRTUAL_WORKSPACE_PATH} as the ro
 4. For bracketed placeholders like [Agent], [Topic], etc., treat the word inside brackets as the literal search keyword unless the user says otherwise.
 5. When given a task, START DOING IT. Do not restate the task, do not list what you will do, do not ask for confirmation. Just execute.`,
         workspaceInfoPrompt,
+        executionEnvironmentPrompt,
         `<citation_requirements>
 If your answer uses linkable content from MCP tools, include a "Sources:" section and otherwise use standard Markdown links: [Title](https://claude.ai/chat/URL).
 </citation_requirements>`,
