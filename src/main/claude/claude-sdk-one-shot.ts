@@ -373,3 +373,20 @@ export async function generateTitleWithClaudeSdk(
     return null;
   }
 }
+
+export async function generateWorkspaceMemoryWithClaudeSdk(
+  memoryPrompt: string,
+  config: AppConfig
+): Promise<string | null> {
+  try {
+    const result = await runPiAiOneShot(
+      memoryPrompt,
+      'You maintain compact shared workspace memory. Return strict JSON only, with no markdown fences or commentary.',
+      config
+    );
+    return result.text || null;
+  } catch (error) {
+    logWarn('[WorkspaceMemory] pi-ai memory extraction failed:', error);
+    return null;
+  }
+}

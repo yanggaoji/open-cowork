@@ -55,6 +55,7 @@ import {
 } from './session-title-utils';
 import { generateTitleWithClaudeSdk } from '../claude/claude-sdk-one-shot';
 import { buildScheduledTaskTitle } from '../../shared/schedule/task-title';
+import { scheduleWorkspaceMemoryUpdate } from '../memory/workspace-memory';
 
 interface AgentRunner {
   run(session: Session, prompt: string, existingMessages: Message[]): Promise<void>;
@@ -676,6 +677,10 @@ export class SessionManager {
         // Run the agent
         await this.agentRunner.run(session, enhancedPrompt, messagesForContext);
 
+        void this.runWorkspaceMemoryUpdate(session, userMessage, messagesForContext.length).catch(
+          (err) => logCtxError('[SessionManager] Workspace memory update failed:', err)
+        );
+
         // 标题生成不再与首轮对话并发，避免与主请求竞争同一上游配额/通道导致体感变慢。
         this.runSessionTitleGeneration(session, prompt, existingMessages).catch((err) =>
           logCtxError('[SessionManager] Title generation failed:', err)
@@ -768,6 +773,28 @@ export class SessionManager {
         this.titleGenerationTokens.delete(session.id);
       }
     }
+  }
+
+  private async runWorkspaceMemoryUpdate(
+    session: Session,
+    userMessage: Message,
+    messageCountBeforeAssistantMessages: number
+  ): Promise<void> {
+    const latestSession = this.loadSession(session.id) ?? session;
+    if (!latestSession.cwd) {
+      return;
+    }
+
+    const assistantMessages = this.getMessages(session.id)
+      .slice(messageCountBeforeAssistantMessages)
+      .filter((message) => message.role === 'assistant');
+
+    await scheduleWorkspaceMemoryUpdate({
+      workspaceDir: latestSession.cwd,
+      userMessage,
+      assistantMessages,
+      config: configStore.getAll(),
+    });
   }
 
   private async withTimeout<T>(

@@ -125,6 +125,13 @@ describe('ClaudeAgentRunner pi-coding-agent integration', () => {
     expect(agentRunnerContent).toContain('START DOING IT');
   });
 
+  it('documents shared workspace memory capability and exposes explicit memory tools', () => {
+    expect(agentRunnerContent).toContain('<memory_capability>');
+    expect(agentRunnerContent).toContain('read_workspace_memory');
+    expect(agentRunnerContent).toContain('save_workspace_memory');
+    expect(agentRunnerContent).toContain('shared long-term workspace memory across sessions');
+  });
+
   it('documents Windows bash semantics and skill import limits in the system prompt', () => {
     expect(agentRunnerContent).toContain(
       'On Windows, the built-in bash tool runs through bash.exe (typically Git Bash/MSYS), not cmd.exe or PowerShell.'

@@ -66,6 +66,15 @@ import {
   normalizeToolExecutionResultForUi,
 } from './tool-result-utils';
 import { fetchOllamaModelInfo } from '../config/ollama-api';
+import {
+  composeContextualPrompt,
+  getWorkspaceMemoryPromptContext,
+  getWorkspaceMemoryPath,
+  listWorkspaceMemoryEntries,
+  saveWorkspaceMemoryEntries,
+  type WorkspaceMemoryCategory,
+  type WorkspaceMemoryEntry,
+} from '../memory/workspace-memory';
 
 // Virtual workspace path shown to the model (hides real sandbox path)
 const VIRTUAL_WORKSPACE_PATH = '/workspace';
@@ -304,6 +313,123 @@ function buildMcpCustomTools(mcpManager: MCPManager): ToolDefinition[] {
     };
     return toolDef;
   });
+}
+
+const workspaceMemoryCategorySchema = Type.Union([
+  Type.Literal('user_preference'),
+  Type.Literal('command_rule'),
+  Type.Literal('os'),
+  Type.Literal('environment'),
+  Type.Literal('dependency'),
+  Type.Literal('workflow'),
+  Type.Literal('constraint'),
+]);
+
+function formatWorkspaceMemoryToolOutput(
+  entries: WorkspaceMemoryEntry[],
+  filePath: string | null,
+  totalEntries: number
+): string {
+  const header = filePath
+    ? `Workspace memory file: ${filePath}`
+    : 'Workspace memory file: unavailable';
+
+  if (entries.length === 0) {
+    return `${header}\nNo matching workspace memory entries found.`;
+  }
+
+  return [
+    header,
+    `Showing ${entries.length} of ${totalEntries} entries.`,
+    ...entries.map((entry) => `- [${entry.category}] ${entry.content}`),
+  ].join('\n');
+}
+
+function buildWorkspaceMemoryTools(workingDir?: string): ToolDefinition[] {
+  const readTool: ToolDefinition<TSchema, unknown> = {
+    name: 'read_workspace_memory',
+    label: 'Read Workspace Memory',
+    description:
+      'Read shared long-term memory for the current workspace. Use this to inspect durable preferences, command rules, OS or environment constraints, dependency facts, and recurring workflow notes saved across sessions.',
+    parameters: Type.Object({
+      category: Type.Optional(workspaceMemoryCategorySchema),
+      query: Type.Optional(Type.String({ maxLength: 200 })),
+      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 12 })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+      const typedParams = (params ?? {}) as {
+        category?: WorkspaceMemoryCategory;
+        query?: string;
+        limit?: number;
+      };
+      const filePath = getWorkspaceMemoryPath(workingDir);
+      const entries = listWorkspaceMemoryEntries(workingDir, typedParams);
+      const totalEntries = listWorkspaceMemoryEntries(workingDir).length;
+
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: formatWorkspaceMemoryToolOutput(entries, filePath, totalEntries),
+          },
+        ],
+        details: undefined,
+      };
+    },
+  };
+
+  const saveTool: ToolDefinition<TSchema, unknown> = {
+    name: 'save_workspace_memory',
+    label: 'Save Workspace Memory',
+    description:
+      'Save a concise durable fact to shared workspace memory for future sessions. Use proactively for stable user preferences, command or shell rules, OS or environment constraints, dependency/toolchain facts, or repeated workflow pitfalls. Never store secrets or transient tasks.',
+    parameters: Type.Object({
+      category: workspaceMemoryCategorySchema,
+      content: Type.String({ minLength: 1, maxLength: 300 }),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+      const typedParams = params as {
+        category: WorkspaceMemoryCategory;
+        content: string;
+      };
+      const filePath = getWorkspaceMemoryPath(workingDir);
+      const document = saveWorkspaceMemoryEntries(workingDir, [
+        {
+          category: typedParams.category,
+          content: typedParams.content,
+        },
+      ]);
+
+      if (!document || !filePath) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: 'Unable to save workspace memory because no workspace directory is configured.',
+            },
+          ],
+          details: undefined,
+        };
+      }
+
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: [
+              `Saved workspace memory to ${filePath}.`,
+              `Category: ${typedParams.category}`,
+              `Content: ${typedParams.content.trim()}`,
+              `Total entries: ${document.entries.length}`,
+            ].join('\n'),
+          },
+        ],
+        details: undefined,
+      };
+    },
+  };
+
+  return [readTool, saveTool];
 }
 
 /**
@@ -1545,6 +1671,17 @@ ${sharedLines.join('\n')}
         cachedSession = undefined;
       }
 
+      const workspaceMemoryContext = getWorkspaceMemoryPromptContext(workingDir);
+      if (workspaceMemoryContext.entryCount > 0) {
+        log(
+          '[ClaudeAgentRunner] Injecting workspace memory:',
+          workspaceMemoryContext.entryCount,
+          'entries from',
+          workspaceMemoryContext.filePath
+        );
+      }
+
+      let conversationHistoryPrompt = '';
       let contextualPrompt = prompt;
       if (!cachedSession) {
         // Cold start: inject recent history into prompt if available
@@ -1597,8 +1734,7 @@ ${sharedLines.join('\n')}
             const trimmedCount = historyMessages.length - historyItems.length;
             const historyNote =
               trimmedCount > 0 ? `[${trimmedCount} older messages omitted]\n` : '';
-            const preamble = `<conversation_history>\n${historyNote}${historyItems.join('\n')}\n</conversation_history>`;
-            contextualPrompt = `${preamble}\n\n${prompt}`;
+            conversationHistoryPrompt = `<conversation_history>\n${historyNote}${historyItems.join('\n')}\n</conversation_history>`;
             log(
               '[ClaudeAgentRunner] Cold start: injecting',
               historyItems.length,
@@ -1618,6 +1754,11 @@ ${sharedLines.join('\n')}
         // Reusing session — SDK already has the full conversation context
         logCtx('[ClaudeAgentRunner] Reusing existing SDK session for:', session.id);
       }
+
+      contextualPrompt = composeContextualPrompt(prompt, {
+        workspaceMemoryPrompt: workspaceMemoryContext.prompt,
+        conversationHistoryPrompt,
+      });
 
       logTiming('before building MCP servers config', runStartTime);
 
@@ -1788,7 +1929,15 @@ This is an isolated sandbox environment. Use ${VIRTUAL_WORKSPACE_PATH} as the ro
 2. When a request is actionable, proceed immediately with reasonable assumptions. If you need clarification, ask briefly in plain text.
 3. For relative time windows like "within two days" in browsing or research tasks, assume the most recent two relevant publication days unless the user explicitly defines another date range.
 4. For bracketed placeholders like [Agent], [Topic], etc., treat the word inside brackets as the literal search keyword unless the user says otherwise.
-5. When given a task, START DOING IT. Do not restate the task, do not list what you will do, do not ask for confirmation. Just execute.`,
+5. When given a task, START DOING IT. Do not restate the task, do not list what you will do, do not ask for confirmation. Just execute.
+6. If a <workspace_memory> block is present in the prompt, treat it as durable cross-session context for this workspace and follow it when relevant.`,
+        `<memory_capability>
+      This app supports shared long-term workspace memory across sessions.
+      - Use read_workspace_memory to inspect current saved memory when it may affect the task.
+      - Use save_workspace_memory proactively when you learn a durable fact worth preserving.
+      - Good memory candidates: stable user preferences, command or shell rules, OS or environment constraints, dependency or toolchain facts, recurring repo workflow notes.
+      - Do not save secrets, access tokens, temporary plans, or one-off task details.
+      </memory_capability>`,
         workspaceInfoPrompt,
         executionEnvironmentPrompt,
         `<citation_requirements>
@@ -1818,11 +1967,13 @@ Tool routing:
 
       // Bridge MCP tools as customTools for pi-coding-agent.
       // Re-read every query so newly added/removed MCP servers take effect immediately.
+      const workspaceMemoryTools = buildWorkspaceMemoryTools(workingDir);
       const mcpCustomTools = this.mcpManager ? buildMcpCustomTools(this.mcpManager) : [];
-      if (mcpCustomTools.length > 0) {
+      const customTools = [...workspaceMemoryTools, ...mcpCustomTools];
+      if (customTools.length > 0) {
         log(
-          `[ClaudeAgentRunner] Registered ${mcpCustomTools.length} MCP tools as customTools:`,
-          mcpCustomTools.map((t) => t.name).join(', ')
+          `[ClaudeAgentRunner] Registered ${customTools.length} customTools:`,
+          customTools.map((t) => t.name).join(', ')
         );
       }
 
@@ -1851,6 +2002,9 @@ Tool routing:
       );
       log(
         `[ClaudeAgentRunner] Custom MCP tools (${mcpCustomTools.length}): ${mcpCustomTools.map((t) => t.name).join(', ')}`
+      );
+      log(
+        `[ClaudeAgentRunner] Workspace memory tools (${workspaceMemoryTools.length}): ${workspaceMemoryTools.map((t) => t.name).join(', ')}`
       );
 
       let piSession: PiAgentSession;
@@ -1939,7 +2093,7 @@ Tool routing:
           authStorage,
           modelRegistry,
           tools: wrappedTools as unknown as ReturnType<typeof createCodingTools>,
-          customTools: mcpCustomTools,
+          customTools,
           sessionManager: PiSessionManager.inMemory(),
           settingsManager: PiSettingsManager.inMemory({
             compaction: compactionSettings,
