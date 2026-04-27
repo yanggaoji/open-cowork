@@ -8,6 +8,7 @@ export interface PiSessionRuntimeSignatureInput {
   modelBaseUrl?: string;
   effectiveCwd?: string;
   apiKey?: string;
+  customToolNames?: string[];
 }
 
 function normalizeText(value: string | undefined): string {
@@ -22,9 +23,7 @@ function fingerprintSecret(value: string | undefined): string {
   return createHash('sha256').update(normalized).digest('hex');
 }
 
-export function buildPiSessionRuntimeSignature(
-  input: PiSessionRuntimeSignatureInput,
-): string {
+export function buildPiSessionRuntimeSignature(input: PiSessionRuntimeSignatureInput): string {
   return JSON.stringify({
     configProvider: normalizeText(input.configProvider),
     customProtocol: normalizeText(input.customProtocol),
@@ -33,5 +32,6 @@ export function buildPiSessionRuntimeSignature(
     modelBaseUrl: normalizeText(input.modelBaseUrl).replace(/\/+$/, ''),
     effectiveCwd: normalizeText(input.effectiveCwd),
     apiKeyFingerprint: fingerprintSecret(input.apiKey),
+    customToolNames: (input.customToolNames || []).map(normalizeText).filter(Boolean).sort(),
   });
 }

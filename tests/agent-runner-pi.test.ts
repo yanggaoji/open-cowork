@@ -78,6 +78,7 @@ describe('ClaudeAgentRunner pi-coding-agent integration', () => {
     expect(agentRunnerContent).toContain(
       'const sessionRuntimeSignature = buildPiSessionRuntimeSignature({'
     );
+    expect(agentRunnerContent).toContain('customToolNames: customTools.map((tool) => tool.name)');
     expect(agentRunnerContent).toContain(
       'cachedSession.runtimeSignature !== sessionRuntimeSignature'
     );
@@ -142,5 +143,12 @@ describe('ClaudeAgentRunner pi-coding-agent integration', () => {
     expect(agentRunnerContent).toContain(
       'Skill folders are instructions and helper files, not automatically importable Python packages.'
     );
+  });
+
+  it('exposes MCP connection control tools and tells the model to use them for stale Chrome sessions', () => {
+    expect(agentRunnerContent).toContain("name: 'mcp_list_servers'");
+    expect(agentRunnerContent).toContain("name: 'mcp_manage_server_connection'");
+    expect(agentRunnerContent).toContain('Chrome after the browser window was closed manually');
+    expect(agentRunnerContent).toContain('MCP connection tools (');
   });
 });

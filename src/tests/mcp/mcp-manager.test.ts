@@ -161,11 +161,139 @@ describe('MCPManager', () => {
       let statuses = manager.getServerStatus();
       expect(statuses[0].status).toBe('failed');
 
-      // After disconnect, status entry is removed; enabled server with no tracked status
-      // falls back to 'connecting' (transient state)
+      // After disconnect, enabled servers keep an explicit disconnected runtime state
       await manager.disconnectServer('disc-test');
       statuses = manager.getServerStatus();
-      expect(statuses[0].status).toBe('connecting');
+      expect(statuses[0].status).toBe('disconnected');
+    });
+  });
+
+  describe('runtime connection controls', () => {
+    it('connects a configured enabled server by id', async () => {
+      const config: MCPServerConfig = {
+        id: 'connect-test',
+        name: 'Connect Test',
+        type: 'sse',
+        url: 'http://127.0.0.1:1/connect-test',
+        enabled: true,
+      };
+
+      (manager as unknown as { serverConfigs: Map<string, MCPServerConfig> }).serverConfigs =
+        new Map([[config.id, config]]);
+      const connectSpy = vi
+        .spyOn(
+          manager as unknown as { connectServer: (config: MCPServerConfig) => Promise<void> },
+          'connectServer'
+        )
+        .mockResolvedValue();
+      const refreshSpy = vi.spyOn(manager, 'refreshTools').mockResolvedValue();
+
+      await manager.connectServerById(config.id);
+
+      expect(connectSpy).toHaveBeenCalledWith(config);
+      expect(refreshSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('disconnects a configured server by id and refreshes tools', async () => {
+      const refreshSpy = vi.spyOn(manager, 'refreshTools').mockResolvedValue();
+      const disconnectSpy = vi.spyOn(manager, 'disconnectServer').mockResolvedValue();
+
+      await manager.disconnectServerById('disconnect-test');
+
+      expect(disconnectSpy).toHaveBeenCalledWith('disconnect-test');
+      expect(refreshSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('restarts a configured enabled server by id', async () => {
+      const config: MCPServerConfig = {
+        id: 'restart-test',
+        name: 'Restart Test',
+        type: 'sse',
+        url: 'http://127.0.0.1:1/restart-test',
+        enabled: true,
+      };
+
+      (manager as unknown as { serverConfigs: Map<string, MCPServerConfig> }).serverConfigs =
+        new Map([[config.id, config]]);
+      const reconnectSpy = vi
+        .spyOn(
+          manager as unknown as { reconnectServer: (serverId: string) => Promise<boolean> },
+          'reconnectServer'
+        )
+        .mockResolvedValue(true);
+
+      await manager.restartServer(config.id);
+
+      expect(reconnectSpy).toHaveBeenCalledWith(config.id);
+    });
+  });
+
+  describe('callTool() recovery', () => {
+    it('reconnects chrome servers when tool results indicate the browser session went stale', async () => {
+      const toolName = 'mcp__Chrome__navigate';
+      const config: MCPServerConfig = {
+        id: 'chrome-server',
+        name: 'Chrome',
+        type: 'stdio',
+        command: 'npx',
+        enabled: true,
+      };
+      const staleResult = {
+        isError: true,
+        content: [{ type: 'text', text: 'Target closed' }],
+      };
+      const successResult = {
+        content: [{ type: 'text', text: 'ok' }],
+      };
+      const client = {
+        callTool: vi.fn().mockResolvedValueOnce(staleResult).mockResolvedValueOnce(successResult),
+      };
+
+      (
+        manager as unknown as {
+          tools: Map<
+            string,
+            {
+              name: string;
+              description: string;
+              inputSchema: { type: string; properties: Record<string, unknown> };
+              serverId: string;
+              serverName: string;
+            }
+          >;
+          clients: Map<string, unknown>;
+          serverConfigs: Map<string, MCPServerConfig>;
+        }
+      ).tools = new Map([
+        [
+          toolName,
+          {
+            name: toolName,
+            description: 'Chrome navigate',
+            inputSchema: { type: 'object', properties: {} },
+            serverId: config.id,
+            serverName: config.name,
+          },
+        ],
+      ]);
+      (manager as unknown as { clients: Map<string, unknown> }).clients = new Map([
+        [config.id, client],
+      ]);
+      (manager as unknown as { serverConfigs: Map<string, MCPServerConfig> }).serverConfigs =
+        new Map([[config.id, config]]);
+
+      const reconnectSpy = vi
+        .spyOn(
+          manager as unknown as { reconnectServer: (serverId: string) => Promise<boolean> },
+          'reconnectServer'
+        )
+        .mockResolvedValue(true);
+
+      const result = await manager.callTool(toolName, { url: 'https://example.com' });
+
+      expect(result).toBe(successResult);
+      expect(reconnectSpy).toHaveBeenCalledWith(config.id);
+      expect(client.callTool).toHaveBeenCalledTimes(2);
     });
   });
 });

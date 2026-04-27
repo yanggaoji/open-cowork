@@ -143,7 +143,10 @@ export class MCPManager {
   // Guards against concurrent reconnect/update operations on the same server
   private reconnectingServers: Set<string> = new Set();
   // Tracks per-server connection status for UI display
-  private connectionStatus = new Map<string, 'connecting' | 'connected' | 'failed'>();
+  private connectionStatus = new Map<
+    string,
+    'connecting' | 'connected' | 'failed' | 'disconnected'
+  >();
 
   /**
    * Get bundled Node.js path
@@ -551,6 +554,58 @@ export class MCPManager {
     await this.disconnectServer(serverId);
     this.serverConfigs.delete(serverId);
     await this.refreshTools();
+  }
+
+  /**
+   * Connect an enabled configured server by id and refresh the tool registry.
+   */
+  async connectServerById(serverId: string): Promise<void> {
+    const config = this.serverConfigs.get(serverId);
+    if (!config) {
+      throw new Error(`MCP server not found: ${serverId}`);
+    }
+    if (!config.enabled) {
+      throw new Error(`MCP server is disabled: ${config.name}`);
+    }
+    if (this.reconnectingServers.has(serverId)) {
+      throw new Error(`MCP server is already reconnecting: ${config.name}`);
+    }
+    if (this.clients.has(serverId)) {
+      log(`[MCPManager] Server already connected: ${config.name}`);
+      return;
+    }
+
+    await this.connectServer(config);
+    await this.refreshTools();
+  }
+
+  /**
+   * Disconnect a configured server by id and refresh the tool registry.
+   */
+  async disconnectServerById(serverId: string): Promise<void> {
+    await this.disconnectServer(serverId);
+    await this.refreshTools();
+  }
+
+  /**
+   * Restart an enabled configured server by id and refresh the tool registry.
+   */
+  async restartServer(serverId: string): Promise<void> {
+    const config = this.serverConfigs.get(serverId);
+    if (!config) {
+      throw new Error(`MCP server not found: ${serverId}`);
+    }
+    if (!config.enabled) {
+      throw new Error(`MCP server is disabled: ${config.name}`);
+    }
+    if (this.reconnectingServers.has(serverId)) {
+      throw new Error(`MCP server is already reconnecting: ${config.name}`);
+    }
+
+    const restarted = await this.reconnectServer(serverId);
+    if (!restarted) {
+      throw new Error(`Failed to restart MCP server: ${config.name}`);
+    }
   }
 
   /**
@@ -1272,6 +1327,7 @@ export class MCPManager {
   async disconnectServer(serverId: string): Promise<void> {
     const client = this.clients.get(serverId);
     const transport = this.transports.get(serverId);
+    const config = this.serverConfigs.get(serverId);
 
     if (client) {
       try {
@@ -1302,7 +1358,11 @@ export class MCPManager {
       this.tools.delete(toolName);
     }
 
-    this.connectionStatus.delete(serverId);
+    if (config?.enabled) {
+      this.connectionStatus.set(serverId, 'disconnected');
+    } else {
+      this.connectionStatus.delete(serverId);
+    }
 
     log(`[MCPManager] Disconnected from server ${serverId}`);
   }
@@ -1474,7 +1534,7 @@ export class MCPManager {
         }
 
         const toolErrorMessage = extractStructuredToolErrorMessage(result);
-        if (shouldReconnectOnStructuredToolError(toolErrorMessage)) {
+        if (shouldReconnectAfterToolError(currentTool.serverName, toolErrorMessage)) {
           // 某些 MCP 服务会把连接错误包在结构化结果里而非直接抛异常，这里转为异常以复用统一重连逻辑。
           throw new Error(toolErrorMessage);
         }
@@ -1506,11 +1566,7 @@ export class MCPManager {
           break;
         }
 
-        const lowerErrorMsg = errorMsg.toLowerCase();
-        const shouldReconnect =
-          lowerErrorMsg.includes('mcp server not connected') ||
-          lowerErrorMsg.includes('not connected') ||
-          lowerErrorMsg.includes('connection closed');
+        const shouldReconnect = shouldReconnectAfterToolError(currentTool.serverName, errorMsg);
 
         if (shouldReconnect) {
           log(
@@ -1581,14 +1637,14 @@ export class MCPManager {
     id: string;
     name: string;
     connected: boolean;
-    status: 'connecting' | 'connected' | 'failed' | 'disabled';
+    status: 'connecting' | 'connected' | 'failed' | 'disabled' | 'disconnected';
     toolCount: number;
   }> {
     const status: Array<{
       id: string;
       name: string;
       connected: boolean;
-      status: 'connecting' | 'connected' | 'failed' | 'disabled';
+      status: 'connecting' | 'connected' | 'failed' | 'disabled' | 'disconnected';
       toolCount: number;
     }> = [];
 
@@ -1599,7 +1655,7 @@ export class MCPManager {
       ).length;
 
       // Derive status: use connectionStatus map if available, otherwise infer from enabled/connected
-      let serverStatus: 'connecting' | 'connected' | 'failed' | 'disabled';
+      let serverStatus: 'connecting' | 'connected' | 'failed' | 'disabled' | 'disconnected';
       const trackedStatus = this.connectionStatus.get(serverId);
       if (!config.enabled) {
         serverStatus = 'disabled';
@@ -1696,7 +1752,7 @@ function extractStructuredToolErrorMessage(result: unknown): string {
       }
     }
 
-    if (topLevelIsError && isReconnectableErrorText(trimmed)) {
+    if (topLevelIsError) {
       return trimmed;
     }
   }
@@ -1721,6 +1777,43 @@ function shouldReconnectOnStructuredToolError(errorMessage: string): boolean {
     return false;
   }
   return isReconnectableErrorText(errorMessage);
+}
+
+function isChromeRecoverableErrorText(text: string): boolean {
+  const normalized = text.trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+
+  return [
+    'target closed',
+    'session closed',
+    'browser disconnected',
+    'browser has disconnected',
+    'websocket closed',
+    'page has been closed',
+    'page closed',
+    'not attached to an active page',
+    'no page selected',
+    'failed to fetch browser websocket url',
+    'unable to connect to browser',
+    'browser is not open',
+    'debug port did not become ready',
+    'econnrefused',
+    'fetch failed',
+  ].some((token) => normalized.includes(token));
+}
+
+function shouldReconnectAfterToolError(serverName: string, errorMessage: string): boolean {
+  if (!errorMessage) {
+    return false;
+  }
+
+  if (shouldReconnectOnStructuredToolError(errorMessage)) {
+    return true;
+  }
+
+  return serverName.toLowerCase().includes('chrome') && isChromeRecoverableErrorText(errorMessage);
 }
 
 function shouldHotReloadGuiVisionServer(

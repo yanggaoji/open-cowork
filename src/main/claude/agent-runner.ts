@@ -315,6 +315,165 @@ function buildMcpCustomTools(mcpManager: MCPManager): ToolDefinition[] {
   });
 }
 
+function formatMcpServerStatusOutput(
+  statuses: ReturnType<MCPManager['getServerStatus']>,
+  filterText?: string
+): string {
+  const normalizedFilter = filterText?.trim().toLowerCase();
+  const filtered = normalizedFilter
+    ? statuses.filter(
+        (status) =>
+          status.id.toLowerCase().includes(normalizedFilter) ||
+          status.name.toLowerCase().includes(normalizedFilter)
+      )
+    : statuses;
+
+  if (filtered.length === 0) {
+    return normalizedFilter
+      ? `No MCP servers matched "${filterText?.trim()}".`
+      : 'No MCP servers are configured.';
+  }
+
+  return [
+    `MCP servers: ${filtered.length}${filtered.length === statuses.length ? '' : ` of ${statuses.length}`}`,
+    ...filtered.map(
+      (status) =>
+        `- ${status.name} [${status.id}] status=${status.status} connected=${status.connected ? 'yes' : 'no'} tools=${status.toolCount}`
+    ),
+  ].join('\n');
+}
+
+function resolveMcpServerTarget(
+  mcpManager: MCPManager,
+  serverSelector?: string
+): ReturnType<MCPManager['getServerStatus']>[number] {
+  const statuses = mcpManager.getServerStatus();
+  const serverSelectorText = serverSelector?.trim() || '';
+  if (statuses.length === 0) {
+    throw new Error('No MCP servers are configured.');
+  }
+
+  const normalizedSelector = serverSelector?.trim().toLowerCase();
+  if (!normalizedSelector) {
+    if (statuses.length === 1) {
+      return statuses[0];
+    }
+    throw new Error(
+      `Multiple MCP servers are configured. Specify one by id or name.\n${formatMcpServerStatusOutput(statuses)}`
+    );
+  }
+
+  const exactMatches = statuses.filter(
+    (status) =>
+      status.id.toLowerCase() === normalizedSelector ||
+      status.name.toLowerCase() === normalizedSelector
+  );
+  if (exactMatches.length === 1) {
+    return exactMatches[0];
+  }
+
+  const partialMatches = statuses.filter(
+    (status) =>
+      status.id.toLowerCase().includes(normalizedSelector) ||
+      status.name.toLowerCase().includes(normalizedSelector)
+  );
+  if (partialMatches.length === 1) {
+    return partialMatches[0];
+  }
+  if (partialMatches.length > 1) {
+    throw new Error(
+      `MCP server selector "${serverSelectorText}" is ambiguous.\n${formatMcpServerStatusOutput(partialMatches)}`
+    );
+  }
+
+  throw new Error(
+    `MCP server "${serverSelectorText}" was not found.\n${formatMcpServerStatusOutput(statuses)}`
+  );
+}
+
+function buildMcpConnectionTools(mcpManager: MCPManager): ToolDefinition[] {
+  const listServersTool: ToolDefinition<TSchema, unknown> = {
+    name: 'mcp_list_servers',
+    label: 'List MCP Servers',
+    description:
+      'List MCP server runtime status, including whether each server is connected, disconnected, failed, or disabled. Use this before targeting a server, or when an MCP integration seems stale.',
+    parameters: Type.Object({
+      query: Type.Optional(Type.String({ maxLength: 120 })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+      const typedParams = (params ?? {}) as { query?: string };
+      const statuses = mcpManager.getServerStatus();
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: formatMcpServerStatusOutput(statuses, typedParams.query),
+          },
+        ],
+        details: undefined,
+      };
+    },
+  };
+
+  const manageConnectionTool: ToolDefinition<TSchema, unknown> = {
+    name: 'mcp_manage_server_connection',
+    label: 'Manage MCP Server Connection',
+    description:
+      'Connect, disconnect, restart, or reset a configured MCP server by id or name. Use this when the user asks to control an MCP connection, or when a browser-backed MCP server became stale after the browser window was closed manually.',
+    parameters: Type.Object({
+      action: Type.Union([
+        Type.Literal('connect'),
+        Type.Literal('disconnect'),
+        Type.Literal('restart'),
+        Type.Literal('reset'),
+      ]),
+      server: Type.Optional(Type.String({ minLength: 1, maxLength: 120 })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+      const typedParams = (params ?? {}) as {
+        action: 'connect' | 'disconnect' | 'restart' | 'reset';
+        server?: string;
+      };
+      const target = resolveMcpServerTarget(mcpManager, typedParams.server);
+      const action = typedParams.action === 'reset' ? 'restart' : typedParams.action;
+
+      if (action === 'connect') {
+        await mcpManager.connectServerById(target.id);
+      } else if (action === 'disconnect') {
+        await mcpManager.disconnectServerById(target.id);
+      } else {
+        await mcpManager.restartServer(target.id);
+      }
+
+      const updatedStatuses = mcpManager.getServerStatus();
+      const updatedTarget = updatedStatuses.find((status) => status.id === target.id) ?? target;
+      const lines = [
+        `Action: ${typedParams.action}`,
+        `Server: ${updatedTarget.name} [${updatedTarget.id}]`,
+        `Status: ${updatedTarget.status}`,
+        `Connected: ${updatedTarget.connected ? 'yes' : 'no'}`,
+        `Tools: ${updatedTarget.toolCount}`,
+      ];
+
+      if (action === 'connect' && !target.connected) {
+        lines.push(
+          'If this was a fresh connection, newly discovered MCP tools will be fully available to the model on the next request.'
+        );
+      }
+      if (action === 'restart') {
+        lines.push('Retry the affected MCP task now if the connection was stale.');
+      }
+
+      return {
+        content: [{ type: 'text' as const, text: lines.join('\n') }],
+        details: undefined,
+      };
+    },
+  };
+
+  return [listServersTool, manageConnectionTool];
+}
+
 const workspaceMemoryCategorySchema = Type.Union([
   Type.Literal('user_preference'),
   Type.Literal('command_rule'),
@@ -1640,6 +1799,11 @@ ${sharedLines.join('\n')}
       // pi-ai handles auth and model routing natively — no proxy, no env overrides needed.
       logCtx('[ClaudeAgentRunner] Using pi-ai native routing for:', piModel.provider, piModel.id);
 
+      const workspaceMemoryTools = buildWorkspaceMemoryTools(workingDir);
+      const mcpConnectionTools = this.mcpManager ? buildMcpConnectionTools(this.mcpManager) : [];
+      const mcpCustomTools = this.mcpManager ? buildMcpCustomTools(this.mcpManager) : [];
+      const customTools = [...workspaceMemoryTools, ...mcpConnectionTools, ...mcpCustomTools];
+
       // Resolve thinking level early — needed for session reuse check below
       const enableThinking = configStore.get('enableThinking') ?? false;
       logCtx('[ClaudeAgentRunner] Enable thinking mode:', enableThinking);
@@ -1653,6 +1817,7 @@ ${sharedLines.join('\n')}
         modelBaseUrl: piModel.baseUrl,
         effectiveCwd,
         apiKey,
+        customToolNames: customTools.map((tool) => tool.name),
       });
 
       // Build contextual prompt — if reusing an existing SDK session, the SDK
@@ -1947,6 +2112,7 @@ If your answer uses linkable content from MCP tools, include a "Sources:" sectio
 Tool routing:
 - If user explicitly asks to use Chrome/browser/web navigation, prioritize Chrome MCP tools (mcp__Chrome__*) over generic WebSearch/WebFetch.
 - Use WebSearch/WebFetch only when Chrome MCP is unavailable or the user explicitly asks for generic web search.
+      - If an MCP server looks stale, especially Chrome after the browser window was closed manually, use mcp_list_servers and mcp_manage_server_connection to inspect or restart the affected server before giving up.
 </tool_behavior>`,
         this.getBundledPathHints(),
       ]
@@ -1966,10 +2132,8 @@ Tool routing:
       log('[ClaudeAgentRunner] Skill paths for pi ResourceLoader:', skillPaths);
 
       // Bridge MCP tools as customTools for pi-coding-agent.
-      // Re-read every query so newly added/removed MCP servers take effect immediately.
-      const workspaceMemoryTools = buildWorkspaceMemoryTools(workingDir);
-      const mcpCustomTools = this.mcpManager ? buildMcpCustomTools(this.mcpManager) : [];
-      const customTools = [...workspaceMemoryTools, ...mcpCustomTools];
+      // Re-read every query so newly added/removed MCP servers take effect immediately,
+      // and fold their names into the runtime signature so stale cached sessions are recreated.
       if (customTools.length > 0) {
         log(
           `[ClaudeAgentRunner] Registered ${customTools.length} customTools:`,
@@ -2002,6 +2166,9 @@ Tool routing:
       );
       log(
         `[ClaudeAgentRunner] Custom MCP tools (${mcpCustomTools.length}): ${mcpCustomTools.map((t) => t.name).join(', ')}`
+      );
+      log(
+        `[ClaudeAgentRunner] MCP connection tools (${mcpConnectionTools.length}): ${mcpConnectionTools.map((t) => t.name).join(', ')}`
       );
       log(
         `[ClaudeAgentRunner] Workspace memory tools (${workspaceMemoryTools.length}): ${workspaceMemoryTools.map((t) => t.name).join(', ')}`

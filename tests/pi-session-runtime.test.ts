@@ -25,25 +25,33 @@ describe('pi session runtime signature', () => {
   it('changes when base url, api, key, or cwd changes', () => {
     const original = buildPiSessionRuntimeSignature(baseInput);
 
-    expect(buildPiSessionRuntimeSignature({
-      ...baseInput,
-      modelBaseUrl: 'https://open.bigmodel.cn/api/paas/v4',
-    })).not.toBe(original);
+    expect(
+      buildPiSessionRuntimeSignature({
+        ...baseInput,
+        modelBaseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+      })
+    ).not.toBe(original);
 
-    expect(buildPiSessionRuntimeSignature({
-      ...baseInput,
-      modelApi: 'openai-responses',
-    })).not.toBe(original);
+    expect(
+      buildPiSessionRuntimeSignature({
+        ...baseInput,
+        modelApi: 'openai-responses',
+      })
+    ).not.toBe(original);
 
-    expect(buildPiSessionRuntimeSignature({
-      ...baseInput,
-      apiKey: 'sk-another-key',
-    })).not.toBe(original);
+    expect(
+      buildPiSessionRuntimeSignature({
+        ...baseInput,
+        apiKey: 'sk-another-key',
+      })
+    ).not.toBe(original);
 
-    expect(buildPiSessionRuntimeSignature({
-      ...baseInput,
-      effectiveCwd: '/workspace/other',
-    })).not.toBe(original);
+    expect(
+      buildPiSessionRuntimeSignature({
+        ...baseInput,
+        effectiveCwd: '/workspace/other',
+      })
+    ).not.toBe(original);
   });
 
   it('normalizes equivalent urls with trailing slashes', () => {
@@ -54,5 +62,37 @@ describe('pi session runtime signature', () => {
     });
 
     expect(normalized).toBe(original);
+  });
+
+  it('changes when the custom tool set changes', () => {
+    const original = buildPiSessionRuntimeSignature({
+      ...baseInput,
+      customToolNames: ['read_workspace_memory', 'mcp_list_servers'],
+    });
+
+    const changed = buildPiSessionRuntimeSignature({
+      ...baseInput,
+      customToolNames: [
+        'read_workspace_memory',
+        'mcp_list_servers',
+        'mcp__Chrome__browser_navigate',
+      ],
+    });
+
+    expect(changed).not.toBe(original);
+  });
+
+  it('normalizes custom tool names ordering', () => {
+    const original = buildPiSessionRuntimeSignature({
+      ...baseInput,
+      customToolNames: ['mcp_list_servers', 'read_workspace_memory'],
+    });
+
+    const reordered = buildPiSessionRuntimeSignature({
+      ...baseInput,
+      customToolNames: ['read_workspace_memory', 'mcp_list_servers'],
+    });
+
+    expect(reordered).toBe(original);
   });
 });
