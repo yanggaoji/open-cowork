@@ -37,6 +37,7 @@ import { SandboxSync } from './sandbox/sandbox-sync';
 import { WSLBridge } from './sandbox/wsl-bridge';
 import { LimaBridge } from './sandbox/lima-bridge';
 import { getSandboxBootstrap } from './sandbox/sandbox-bootstrap';
+import { ensureWindowsHostPythonRuntime } from './python/windows-host-runtime';
 import type { MCPServerConfig } from './mcp/mcp-manager';
 import type {
   ClientEvent,
@@ -546,6 +547,7 @@ function createWindow() {
 
     // Start sandbox bootstrap after window is loaded
     startSandboxBootstrap();
+    void startWindowsHostPythonBootstrap();
   });
 }
 
@@ -668,6 +670,33 @@ async function startSandboxBootstrap(): Promise<void> {
     log('[App] Sandbox bootstrap complete:', result.mode);
   } catch (error) {
     logError('[App] Sandbox bootstrap error:', error);
+  }
+}
+
+async function startWindowsHostPythonBootstrap(): Promise<void> {
+  if (process.platform !== 'win32' || !app.isPackaged) {
+    return;
+  }
+
+  try {
+    log('[App] Starting Windows host Python bootstrap...');
+    await ensureWindowsHostPythonRuntime({
+      baseDir: app.getPath('userData'),
+      onLog: (level, message) => {
+        if (level === 'error') {
+          logError(`[WindowsHostPython] ${message}`);
+        } else if (level === 'warn') {
+          logWarn(`[WindowsHostPython] ${message}`);
+        } else {
+          log(`[WindowsHostPython] ${message}`);
+        }
+      },
+    });
+    log('[App] Windows host Python bootstrap complete');
+  } catch (error) {
+    logWarn(
+      `[App] Windows host Python bootstrap failed: ${error instanceof Error ? error.message : String(error)}`
+    );
   }
 }
 

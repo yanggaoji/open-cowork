@@ -33,6 +33,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
+import { ensureWindowsHostPythonRuntime } from '../python/windows-host-runtime.js';
 writeMCPLog('Imported Node.js built-in modules', 'Bootstrap');
 
 const execFileAsync = promisify(execFile);
@@ -1179,6 +1180,58 @@ async function resolvePythonExec(): Promise<PythonExec | null> {
   // 2) Bundled with the app (recommended for production)
   // Packaged layout: Resources/python/bin/python3
   // Dev layout:      resources/python/darwin-${arch}/bin/python3
+  if (PLATFORM === 'win32' && !isDev) {
+    try {
+      writeMCPLog(
+        '[resolvePythonExec] Checking managed Windows host Python runtime',
+        'Python Resolve'
+      );
+      const managedRuntime = await ensureWindowsHostPythonRuntime({
+        baseDir: OPEN_COWORK_DATA_DIR,
+        onLog: (level, message) => {
+          const label =
+            level === 'error'
+              ? 'Python Resolve Error'
+              : level === 'warn'
+                ? 'Python Resolve Warning'
+                : 'Python Resolve';
+          writeMCPLog(`[WindowsHostPython] ${message}`, label);
+        },
+      });
+
+      if (managedRuntime) {
+        const env: NodeJS.ProcessEnv = {
+          ...baseEnv,
+          PYTHONHOME: managedRuntime.root,
+          PYTHONNOUSERSITE: '1',
+          PYTHONDONTWRITEBYTECODE: '1',
+          PYTHONUTF8: '1',
+        };
+        if (await pathExists(managedRuntime.sitePackages)) {
+          env.PYTHONPATH = [managedRuntime.sitePackages, baseEnv.PYTHONPATH]
+            .filter(Boolean)
+            .join(path.delimiter);
+        }
+
+        cachedPythonExec = {
+          python: managedRuntime.python3 || managedRuntime.python,
+          pythonRoot: managedRuntime.root,
+          env,
+        };
+        writeMCPLog(
+          `[resolvePythonExec] Using managed Windows Python: ${cachedPythonExec.python}`,
+          'Python Resolve'
+        );
+        return cachedPythonExec;
+      }
+    } catch (error) {
+      writeMCPLog(
+        `[resolvePythonExec] Managed Windows Python bootstrap failed: ${error instanceof Error ? error.message : String(error)}`,
+        'Python Resolve Error'
+      );
+    }
+  }
+
   if (PLATFORM === 'darwin') {
     const arch = process.arch === 'arm64' ? 'arm64' : 'x64';
     writeMCPLog(`[resolvePythonExec] Checking bundled Python (arch: ${arch})`, 'Python Resolve');
@@ -1283,6 +1336,7 @@ async function executePython(
   if (!execInfo) {
     throw new Error(
       'Python 3 runtime not found.\n' +
+        '- On Windows, Open Cowork should auto-download a private Python runtime under the app data directory. Retry after network access is available.\n' +
         '- Recommended (macOS): bundle Python into the app at Resources/python/bin/python3 with required packages (Pillow, pyobjc-framework-Quartz)\n' +
         '- Or install python3 + dependencies on this machine.\n'
     );

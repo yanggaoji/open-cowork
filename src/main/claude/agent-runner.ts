@@ -67,6 +67,10 @@ import {
 } from './tool-result-utils';
 import { fetchOllamaModelInfo } from '../config/ollama-api';
 import {
+  ensureWindowsHostPythonRuntime,
+  resolveWindowsHostPythonRuntime,
+} from '../python/windows-host-runtime';
+import {
   composeContextualPrompt,
   getWorkspaceMemoryPromptContext,
   getWorkspaceMemoryPath,
@@ -117,12 +121,20 @@ function getBundledNodePaths(): { node: string; npx: string } | null {
 }
 
 /**
- * Resolve bundled Python bin directory path (if available).
- * Checks packaged and dev layouts, returns the bin dir containing python3.
+ * Resolve app Python bin directory path (if available).
+ * On packaged Windows builds this points at the app-managed runtime in userData.
+ * On macOS/Linux it keeps using the bundled runtime under resources.
  */
 function resolveBundledPythonBinDir(): string | null {
   const platform = process.platform;
   const arch = process.arch === 'arm64' ? 'arm64' : 'x64';
+
+  if (platform === 'win32' && app.isPackaged) {
+    const managedRuntime = resolveWindowsHostPythonRuntime(app.getPath('userData'));
+    if (managedRuntime) {
+      return managedRuntime.root;
+    }
+  }
 
   const candidates: string[] = [];
   if (!app.isPackaged) {
@@ -245,6 +257,26 @@ async function enrichProcessPathForBuild(): Promise<void> {
   const nodePaths = getBundledNodePaths();
   if (nodePaths) {
     bundledDirs.push(path.dirname(nodePaths.node));
+  }
+
+  if (platform === 'win32') {
+    try {
+      await ensureWindowsHostPythonRuntime({
+        baseDir: app.getPath('userData'),
+        onLog: (level, message) => {
+          if (level === 'error') {
+            logError(`[ClaudeAgentRunner] ${message}`);
+          } else if (level === 'warn') {
+            logWarn(`[ClaudeAgentRunner] ${message}`);
+          } else {
+            log(`[ClaudeAgentRunner] ${message}`);
+          }
+        },
+      });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      logWarn(`[ClaudeAgentRunner] Windows host Python bootstrap failed: ${message}`);
+    }
   }
 
   const pythonBinDir = resolveBundledPythonBinDir();
@@ -777,11 +809,20 @@ export class ClaudeAgentRunner {
 
     const pythonBinDir = resolveBundledPythonBinDir();
     if (pythonBinDir) {
-      const pythonExe = process.platform === 'win32' ? 'python.exe' : 'python3';
-      const pipExe = process.platform === 'win32' ? 'pip.exe' : 'pip3';
-      hints.push(`- python3: ${path.join(pythonBinDir, pythonExe)}`);
-      if (fs.existsSync(path.join(pythonBinDir, pipExe))) {
-        hints.push(`- pip3: ${path.join(pythonBinDir, pipExe)}`);
+      const pythonCandidates = process.platform === 'win32' ? ['python3.exe', 'python.exe'] : ['python3'];
+      const pythonPath = pythonCandidates
+        .map((candidate) => path.join(pythonBinDir, candidate))
+        .find((candidate) => fs.existsSync(candidate));
+      if (pythonPath) {
+        hints.push(`- python3: ${pythonPath}`);
+      }
+
+      const pipCandidates = process.platform === 'win32' ? ['pip3.cmd', 'pip.cmd'] : ['pip3'];
+      const pipPath = pipCandidates
+        .map((candidate) => path.join(pythonBinDir, candidate))
+        .find((candidate) => fs.existsSync(candidate));
+      if (pipPath) {
+        hints.push(`- pip3: ${pipPath}`);
       }
     }
 
