@@ -2,7 +2,7 @@ name: Codex PR Review
 
 on:
   pull_request_target:
-    types: [opened, reopened, ready_for_review, synchronize]
+    types: [opened, reopened, ready_for_review, synchronize, labeled]
 
 concurrency:
   group: codex-pr-review-${{ github.event.pull_request.number }}
@@ -81,7 +81,7 @@ jobs:
         if: steps.check_bot.outputs.has_review_for_current_head != 'true'
         uses: actions/checkout@v6
         with:
-          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          ref: ${{ github.event.pull_request.base.ref }}
           fetch-depth: 0
 
       - name: Pre-fetch base and head refs
@@ -89,7 +89,7 @@ jobs:
         run: |
           git fetch --no-tags origin \
             ${{ github.event.pull_request.base.ref }} \
-            +refs/pull/${{ github.event.pull_request.number }}/head
+            +refs/pull/${{ github.event.pull_request.number }}/head:refs/remotes/pull/${{ github.event.pull_request.number }}/head
 
       - name: Run Codex for PR Review
         id: run_codex

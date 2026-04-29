@@ -70,9 +70,10 @@ fi
 1. **Load context (progressive)**: `CLAUDE.md`, `README.md`, then only needed source files.
 2. **Determine review mode**: `initial` when no prior bot review exists for another commit, otherwise `follow-up after new commits`.
 3. **Review the latest PR diff in full**: correctness, security (OWASP top 10), regressions, data loss, performance, and maintainability.
-4. **Follow-up context**: when `IS_FOLLOW_UP_REVIEW=true`, use the previous bot review and compare diff only as context for what changed since the last bot pass. Do not limit the review to those changes.
-5. **Check tests**: note missing or inadequate coverage. Tests should be in `src/tests/` mirroring the source structure.
-6. **Respond** with an evidence-based review comment (no code changes).
+4. **File context**: the workflow checks out the trusted base branch and pre-fetches the PR head. Use `gh pr diff` for changed hunks; when you need PR-head file contents, read them with `git show "refs/remotes/pull/$pr_number/head:path/to/file"` rather than assuming the working tree is the PR head.
+5. **Follow-up context**: when `IS_FOLLOW_UP_REVIEW=true`, use the previous bot review and compare diff only as context for what changed since the last bot pass. Do not limit the review to those changes.
+6. **Check tests**: note missing or inadequate coverage. Tests should be in `src/tests/` mirroring the source structure.
+7. **Respond** with an evidence-based review comment (no code changes).
 
 ## Response Guidelines
 
